@@ -4,7 +4,7 @@ All notable changes to VecGrep are documented here.
 
 ---
 
-## [Unreleased] — feat/byok-embedding-providers
+## [1.7.0] — 2026-03-04
 
 ### Added
 

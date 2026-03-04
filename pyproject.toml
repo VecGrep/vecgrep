@@ -1,6 +1,6 @@
 [project]
 name = "vecgrep"
-version = "1.6.0"
+version = "1.7.0"
 description = "Cursor-style vector search MCP plugin for Claude Code"
 readme = "README.md"
 license = { text = "MIT" }
