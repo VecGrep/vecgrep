@@ -925,3 +925,128 @@ class TestProcessFileUpdatesMerkle:
 
         tree = _load_merkle_tree(str(tmp_path.resolve()))
         assert str(f) in tree or str(f.resolve()) in tree
+
+
+# ---------------------------------------------------------------------------
+# Provider locking and guards
+# ---------------------------------------------------------------------------
+
+
+class TestProviderLocking:
+    def test_switch_provider_without_force_returns_error(self, tmp_path):
+        """Switching provider without force=True should return an error."""
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        # Index with local provider
+        result = _do_index(str(tmp_path), provider="local")
+        assert "Error" not in result
+
+        # Attempt switch to openai without force — should fail
+        result2 = _do_index(str(tmp_path), provider="openai", force=False)
+        assert "Error" in result2
+        assert "force=True" in result2
+
+    def test_same_provider_does_not_raise(self, tmp_path):
+        """Re-indexing with the same provider succeeds without force."""
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        _do_index(str(tmp_path), provider="local")
+        result = _do_index(str(tmp_path), provider="local")
+        assert "Error" not in result
+
+    def test_no_provider_defaults_to_stored(self, tmp_path):
+        """Passing provider=None falls back to the stored provider."""
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        _do_index(str(tmp_path), provider="local")
+        result = _do_index(str(tmp_path), provider=None)
+        assert "Error" not in result
+
+
+class TestCloudWatchGuard:
+    def test_watch_with_openai_provider_returns_error(self, tmp_path, monkeypatch):
+        """watch=True + cloud provider should be blocked."""
+        monkeypatch.setenv("VECGREP_OPENAI_KEY", "test-key")
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        result = _do_index(str(tmp_path), watch=True, provider="openai")
+        assert "Error" in result
+        assert "watch=True" in result
+        assert "openai" in result
+
+    def test_watch_with_local_provider_is_allowed(self, tmp_path):
+        """watch=True + local provider should work normally."""
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        root_str = str(tmp_path.resolve())
+
+        with patch("vecgrep.server._ensure_watcher") as mock_watcher:
+            result = _do_index(root_str, watch=True, provider="local")
+            mock_watcher.assert_called_once()
+        assert "Error" not in result
+
+        if root_str in _OBSERVER_REGISTRY:
+            _OBSERVER_REGISTRY[root_str].stop()
+            _OBSERVER_REGISTRY[root_str].join(timeout=2)
+            del _OBSERVER_REGISTRY[root_str]
+
+
+class TestGetIndexStatusProviderFields:
+    def test_status_includes_provider_info(self, tmp_path):
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        _do_index(str(tmp_path), provider="local")
+        result = get_index_status(str(tmp_path))
+        assert "Provider" in result
+        assert "Model" in result
+        assert "Dimensions" in result
+        assert "local" in result
+
+    def test_status_unknown_path_has_defaults(self, tmp_path):
+        result = get_index_status(str(tmp_path))
+        assert "Provider" in result
+
+
+class TestResolveProvider:
+    def test_unknown_provider_raises_value_error(self, tmp_path):
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        result = _do_index(str(tmp_path), provider="nonexistent")
+        assert "Error" in result
+        assert "Unknown provider" in result or "nonexistent" in result
+
+    def test_force_allows_provider_switch(self, tmp_path, monkeypatch):
+        """force=True permits switching provider even if stored differs."""
+        monkeypatch.setenv("VECGREP_OPENAI_KEY", "test-key")
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        _do_index(str(tmp_path), provider="local")
+
+        # Mock OpenAI embed so we don't hit the real API
+        import numpy as np
+
+        from vecgrep.embedder import OpenAIProvider
+
+        fake_vecs = np.random.default_rng(0).standard_normal((1, 1536)).astype(np.float32)
+        fake_vecs /= np.linalg.norm(fake_vecs, axis=1, keepdims=True)
+
+        with patch.object(OpenAIProvider, "embed", return_value=fake_vecs):
+            result = _do_index(str(tmp_path), provider="openai", force=True)
+        assert "Error" not in result or "provider" not in result.lower()
+
+
+class TestLiveSyncSkipsNonLocalProvider:
+    def test_process_file_skips_when_cloud_provider_stored(self, tmp_path):
+        """LiveSyncHandler._process_file should skip when stored provider is not local."""
+        f = tmp_path / "a.py"
+        f.write_text("def foo(): pass\n")
+        _do_index(str(tmp_path))
+
+        # Manually set provider to openai in meta
+        root_str = str(tmp_path.resolve())
+        with _get_store(root_str) as store:
+            store.set_provider_meta("openai", "text-embedding-3-small", 1536)
+
+        h = LiveSyncHandler(root_str, [])
+        # Should return early without attempting to embed
+        with patch("vecgrep.server.get_provider") as mock_get:
+            h._process_file(str(f))
+            # get_provider("local") is called to get the embedder only for local provider;
+            # since stored provider is openai, it should not be called for embedding
+            # (it may be called once to read provider name, but embed should not be called)
+            for call in mock_get.call_args_list:
+                # Ensure embed was never called on the returned mock
+                if mock_get.return_value.embed.called:
+                    raise AssertionError("embed() should not be called for cloud providers")

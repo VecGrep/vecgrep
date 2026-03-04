@@ -158,3 +158,101 @@ class TestBuildIndex:
             result = s.build_index()
         assert result is True
         mock_create.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Dynamic dims
+# ---------------------------------------------------------------------------
+
+
+class TestDynamicDims:
+    def test_default_dims_is_384(self, tmp_path):
+        s = VectorStore(tmp_path / "d384")
+        assert s._dims == 384
+
+    def test_custom_dims_stored(self, tmp_path):
+        s = VectorStore(tmp_path / "d1536", dims=1536)
+        assert s._dims == 1536
+
+    def test_stored_dims_used_on_reopen(self, tmp_path):
+        idx = tmp_path / "reopen"
+        s1 = VectorStore(idx, dims=1024)
+        s1._set_meta("dims", "1024")
+        # Reopen with a different dims param — stored should win
+        s2 = VectorStore(idx, dims=384)
+        assert s2._dims == 1024
+
+    def test_chunks_added_with_custom_dims(self, tmp_path):
+        idx = tmp_path / "custom"
+        s = VectorStore(idx, dims=8)
+        vecs = make_unit_vecs(2, dim=8)
+        rows = make_rows(2)
+        s.add_chunks(rows, vecs)
+        assert s.status()["total_chunks"] == 2
+
+    def test_drop_and_recreate_chunks(self, tmp_path):
+        idx = tmp_path / "drop"
+        s = VectorStore(idx, dims=384)
+        vecs = make_unit_vecs(3)
+        s.add_chunks(make_rows(3), vecs)
+        assert s.status()["total_chunks"] == 3
+
+        s.drop_and_recreate_chunks(dims=1024)
+        assert s.status()["total_chunks"] == 0
+        assert s._dims == 1024
+
+
+# ---------------------------------------------------------------------------
+# Provider meta
+# ---------------------------------------------------------------------------
+
+
+class TestProviderMeta:
+    def test_default_provider_meta(self, tmp_path):
+        s = VectorStore(tmp_path / "meta_default")
+        meta = s.get_provider_meta()
+        assert meta["provider"] == "local"
+
+    def test_set_and_get_provider_meta(self, store):
+        store.set_provider_meta("openai", "text-embedding-3-small", 1536)
+        meta = store.get_provider_meta()
+        assert meta["provider"] == "openai"
+        assert meta["model"] == "text-embedding-3-small"
+        assert meta["dims"] == 1536
+
+    def test_provider_meta_persists_across_reopen(self, tmp_path):
+        idx = tmp_path / "persist"
+        s1 = VectorStore(idx)
+        s1.set_provider_meta("voyage", "voyage-code-2", 1024)
+
+        s2 = VectorStore(idx)
+        meta = s2.get_provider_meta()
+        assert meta["provider"] == "voyage"
+        assert meta["model"] == "voyage-code-2"
+        assert meta["dims"] == 1024
+
+    def test_status_includes_provider_fields(self, store):
+        store.set_provider_meta("local", "some-model", 384)
+        s = store.status()
+        assert "provider" in s
+        assert "model" in s
+        assert "dims" in s
+
+
+# ---------------------------------------------------------------------------
+# Meta helpers
+# ---------------------------------------------------------------------------
+
+
+class TestMetaHelpers:
+    def test_get_missing_key_returns_none(self, store):
+        assert store._get_meta("nonexistent_key") is None
+
+    def test_set_and_get_meta(self, store):
+        store._set_meta("mykey", "myvalue")
+        assert store._get_meta("mykey") == "myvalue"
+
+    def test_set_meta_overwrites(self, store):
+        store._set_meta("k", "v1")
+        store._set_meta("k", "v2")
+        assert store._get_meta("k") == "v2"

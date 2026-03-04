@@ -122,15 +122,19 @@ class LocalProvider(EmbeddingProvider):
             from fastembed.common.model_description import ModelSource, PoolingType  # type: ignore
 
             if MODEL_NAME == DEFAULT_MODEL:
-                TextEmbedding.add_custom_model(
-                    model=DEFAULT_MODEL,
-                    pooling=PoolingType.MEAN,
-                    normalization=True,
-                    sources=ModelSource(hf=DEFAULT_MODEL),
-                    dim=384,
-                    model_file="onnx/model.onnx",
-                    description="Fine-tuned MiniLM for semantic code search",
-                )
+                try:
+                    TextEmbedding.add_custom_model(
+                        model=DEFAULT_MODEL,
+                        pooling=PoolingType.MEAN,
+                        normalization=True,
+                        sources=ModelSource(hf=DEFAULT_MODEL),
+                        dim=384,
+                        model_file="onnx/model.onnx",
+                        description="Fine-tuned MiniLM for semantic code search",
+                    )
+                except ValueError:
+                    # Model already registered in this process — safe to ignore
+                    pass
             self._onnx_model = TextEmbedding(MODEL_NAME)
         return self._onnx_model
 
@@ -287,10 +291,13 @@ class VoyageProvider(EmbeddingProvider):
 
 
 class GeminiProvider(EmbeddingProvider):
-    """Cloud embeddings via Google Gemini gemini-embedding-001 (768 dims)."""
+    """Cloud embeddings via Google Gemini gemini-embedding-001 (3072 dims).
+
+    Uses the google-genai SDK (install with: pip install 'vecgrep[gemini]').
+    """
 
     _MODEL = "gemini-embedding-001"
-    _DIMS = 768
+    _DIMS = 3072
 
     def __init__(self) -> None:
         key = os.environ.get("VECGREP_GEMINI_KEY")
@@ -300,7 +307,7 @@ class GeminiProvider(EmbeddingProvider):
                 "Set it to your Google Gemini API key and retry."
             )
         self._key = key
-        self._configured = False
+        self._client = None
 
     @property
     def name(self) -> str:
@@ -318,33 +325,30 @@ class GeminiProvider(EmbeddingProvider):
     def batch_size(self) -> int:
         return 100  # Gemini batch limit
 
-    def _ensure_configured(self):
-        if not self._configured:
+    def _get_client(self):
+        if self._client is None:
             try:
-                import google.generativeai as genai  # type: ignore
+                from google import genai  # type: ignore
             except ImportError as exc:
                 raise RuntimeError(
-                    "google-generativeai package is required for Gemini embeddings. "
+                    "google-genai package is required for Gemini embeddings. "
                     "Install it with: pip install 'vecgrep[gemini]'"
                 ) from exc
-            genai.configure(api_key=self._key)
-            self._configured = True
+            self._client = genai.Client(api_key=self._key)
+        return self._client
 
     def embed(self, texts: list[str]) -> np.ndarray:
         if not texts:
             return np.empty((0, self.dims), dtype=np.float32)
 
-        self._ensure_configured()
-        import google.generativeai as genai  # type: ignore
-
+        client = self._get_client()
         embeddings = []
         for text in texts:
-            result = genai.embed_content(
+            result = client.models.embed_content(
                 model=self._MODEL,
-                content=text,
-                task_type="retrieval_document",
+                contents=text,
             )
-            embeddings.append(result["embedding"])
+            embeddings.append(result.embeddings[0].values)
 
         vecs = np.array(embeddings, dtype=np.float32)
         return self._normalize(vecs)
