@@ -18,7 +18,7 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from vecgrep.chunker import chunk_file
-from vecgrep.embedder import _detect_device, embed
+from vecgrep.embedder import EmbeddingProvider, _detect_device, embed, get_provider
 from vecgrep.store import VectorStore
 
 _log = logging.getLogger(__name__)
@@ -134,9 +134,9 @@ def _project_hash(path: str) -> str:
     return hashlib.sha256(path.encode()).hexdigest()[:16]
 
 
-def _get_store(path: str) -> VectorStore:
+def _get_store(path: str, dims: int = 384) -> VectorStore:
     index_dir = VECGREP_HOME / _project_hash(path)
-    return VectorStore(index_dir)
+    return VectorStore(index_dir, dims=dims)
 
 
 def _sha256_file(file_path: Path) -> str:
@@ -160,6 +160,39 @@ def _load_gitignore(root: Path) -> list[str]:
             if line and not line.startswith("#"):
                 patterns.append(line)
     return patterns
+
+
+# ---------------------------------------------------------------------------
+# Provider resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_provider(path: str, requested: str | None, force: bool) -> EmbeddingProvider:
+    """Determine which provider to use and enforce the per-project lock.
+
+    Rules:
+    - If no stored provider, use *requested* (or 'local' as default).
+    - If stored provider matches *requested* (or *requested* is None), use stored.
+    - If stored differs from *requested* and force=False → raise RuntimeError.
+    - If stored differs and force=True → allow switch (caller must recreate table).
+    """
+    with _get_store(path) as store:
+        meta = store.get_provider_meta()
+        stored_provider = meta["provider"]
+
+    # Treat 'unknown' stored provider as 'local' (pre-BYOK index)
+    if stored_provider == "unknown":
+        stored_provider = "local"
+
+    effective = requested or stored_provider
+
+    if requested and stored_provider != "unknown" and stored_provider != requested and not force:
+        raise RuntimeError(
+            f"Index was built with provider '{stored_provider}'. "
+            f"Switching to '{requested}' requires force=True to rebuild the index."
+        )
+
+    return get_provider(effective)
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +300,8 @@ def _merkle_sync(path_str: str) -> str:
         _ensure_watcher(root, gitignore)
         return "No file changes detected"
 
-    result = _do_index(path_str, force=False, watch=True)
+    # Auto-read stored provider; do not pass provider param so it defaults to stored
+    result = _do_index(path_str, force=False, watch=True, provider=None)
     return result
 
 
@@ -319,6 +353,18 @@ class LiveSyncHandler(FileSystemEventHandler):
         if _is_ignored_by_gitignore(rel, self.gitignore_patterns) or _should_skip_file(file_path):
             return
 
+        # Read stored provider — skip live sync for non-local providers (cost risk)
+        with _get_store(self.root_path) as store:
+            provider_name = store.get_provider_meta()["provider"]
+        if provider_name not in ("local", "unknown"):
+            _log.warning(
+                "LiveSync skipped for %s: provider '%s' is not local",
+                file_path_str, provider_name,
+            )
+            return
+
+        emb_provider = get_provider("local")
+
         # Perform targeted index for this single file
         lock = _get_index_lock(self.root_path)
         if not lock.acquire(blocking=False):
@@ -369,9 +415,10 @@ class LiveSyncHandler(FileSystemEventHandler):
                 ]
                 texts = [c.content for c in chunks]
 
+                batch_size = emb_provider.batch_size
                 batch_vecs: list[np.ndarray] = []
-                for i in range(0, len(texts), EMBED_BATCH):
-                    batch_vecs.append(embed(texts[i : i + EMBED_BATCH]))
+                for i in range(0, len(texts), batch_size):
+                    batch_vecs.append(emb_provider.embed(texts[i : i + batch_size]))
                 vecs = np.concatenate(batch_vecs)
 
                 store.replace_file_chunks(fp_str, rows, vecs)
@@ -500,10 +547,29 @@ def _walk_files(root: Path, gitignore_patterns: list[str]) -> list[Path]:
     return files
 
 
-def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
+def _do_index(
+    path: str,
+    force: bool = False,
+    watch: bool = False,
+    provider: str | None = None,
+) -> str:
     root = Path(path).resolve()
     if not root.exists():
         return f"Error: path does not exist: {path}"
+
+    # Resolve provider before acquiring lock (may raise)
+    try:
+        emb_provider = _resolve_provider(str(root), provider, force)
+    except (RuntimeError, ValueError) as exc:
+        return f"Error: {exc}"
+
+    # Guard: cloud providers must not be used with watch=True
+    if watch and emb_provider.name != "local":
+        return (
+            f"Error: watch=True is not supported with provider '{emb_provider.name}'. "
+            "Live sync with cloud embedding providers would incur unbounded API costs. "
+            "Use watch=True only with the local provider."
+        )
 
     lock = _get_index_lock(str(root))
     if not lock.acquire(blocking=False):
@@ -513,7 +579,13 @@ def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
         gitignore = _load_gitignore(root)
         all_files = _walk_files(root, gitignore)
 
-        with _get_store(str(root)) as store:
+        with _get_store(str(root), dims=emb_provider.dims) as store:
+            # If force + provider changed dims, drop and recreate the table
+            stored_meta = store.get_provider_meta()
+            stored_dims = stored_meta["dims"]
+            if force and stored_dims != emb_provider.dims:
+                store.drop_and_recreate_chunks(emb_provider.dims)
+
             existing_stats = {} if force else store.get_file_stats()
 
             # Orphan cleanup: remove chunks for files no longer on disk
@@ -575,9 +647,10 @@ def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
                 ]
                 texts = [c.content for c in chunks]
 
+                batch_size = emb_provider.batch_size
                 batch_vecs: list[np.ndarray] = []
-                for i in range(0, len(texts), EMBED_BATCH):
-                    batch_vecs.append(embed(texts[i : i + EMBED_BATCH]))
+                for i in range(0, len(texts), batch_size):
+                    batch_vecs.append(emb_provider.embed(texts[i : i + batch_size]))
                 vecs = np.concatenate(batch_vecs)
 
                 if is_existing:
@@ -589,6 +662,7 @@ def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
                 total_new_chunks += len(chunks)
 
             store.touch_last_indexed()
+            store.set_provider_meta(emb_provider.name, emb_provider.model, emb_provider.dims)
 
             # Build ANN index when files changed (enables sub-linear search on large repos)
             if files_changed > 0:
@@ -617,7 +691,12 @@ def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
 
 
 @mcp.tool()
-def index_codebase(path: str, force: bool = False, watch: bool = False) -> str:
+def index_codebase(
+    path: str,
+    force: bool = False,
+    watch: bool = False,
+    provider: str | None = None,
+) -> str:
     """
     Index a codebase directory for semantic search.
 
@@ -629,12 +708,18 @@ def index_codebase(path: str, force: bool = False, watch: bool = False) -> str:
         path: Absolute path to the codebase root directory.
         force: If True, re-index all files even if unchanged.
         watch: If True, start a background watcher for live sync on file changes.
+               Not supported with cloud providers (openai, voyage, gemini).
+        provider: Embedding provider to use. One of: 'local' (default), 'openai',
+                  'voyage', 'gemini'. Cloud providers require the corresponding
+                  env var (VECGREP_OPENAI_KEY, VECGREP_VOYAGE_KEY, VECGREP_GEMINI_KEY)
+                  and optional dependency (pip install 'vecgrep[openai]' etc.).
+                  Once set, switching providers requires force=True to rebuild the index.
 
     Returns:
         Summary: files indexed, chunks added, files skipped.
     """
     try:
-        return _do_index(path, force=force, watch=watch)
+        return _do_index(path, force=force, watch=watch, provider=provider)
     except Exception as e:
         return f"Error: {e}"
 
@@ -677,6 +762,7 @@ def search_code(query: str, path: str, top_k: int = 8) -> str:
         if needs_index:
             index_result = _do_index(str(root), force=False)
 
+        # Read stored provider to embed the query with the same model
         with _get_store(str(root)) as store:
             if store.status()["total_chunks"] == 0:
                 msg = f"No indexable files found in {path}."
@@ -684,7 +770,15 @@ def search_code(query: str, path: str, top_k: int = 8) -> str:
                     msg += f"\n(Index attempt: {index_result})"
                 return msg
 
-            query_vec = embed([query])[0]
+            stored_provider = store.get_provider_meta()["provider"]
+            try:
+                emb_provider: EmbeddingProvider = get_provider(
+                    stored_provider if stored_provider not in ("unknown",) else "local"
+                )
+            except (RuntimeError, ValueError):
+                emb_provider = get_provider("local")
+
+            query_vec = emb_provider.embed([query])[0]
             results = store.search(query_vec, top_k=top_k)
 
         if not results:
@@ -734,6 +828,9 @@ def get_index_status(path: str) -> str:
             f"  Total chunks:   {s['total_chunks']}\n"
             f"  Last indexed:   {s['last_indexed']}\n"
             f"  Index size:     {size_mb:.1f} MB\n"
+            f"  Provider:       {s['provider']}\n"
+            f"  Model:          {s['model']}\n"
+            f"  Dimensions:     {s['dims']}\n"
             f"  Compute device: {device_label}"
         )
     except Exception as e:
