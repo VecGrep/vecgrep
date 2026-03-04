@@ -4,6 +4,64 @@ All notable changes to VecGrep are documented here.
 
 ---
 
+## [Unreleased] — feat/byok-embedding-providers
+
+### Added
+
+- **BYOK cloud embedding providers** — bring your own API key to use OpenAI,
+  Voyage AI, or Google Gemini embeddings instead of the default local model.
+  Pass `provider="openai"` (or `"voyage"` / `"gemini"`) to `index_codebase`.
+
+  | Provider | Model | Dims | API key env var | Install extra |
+  |---|---|---|---|---|
+  | `openai` | `text-embedding-3-small` | 1536 | `VECGREP_OPENAI_KEY` | `vecgrep[openai]` |
+  | `voyage` | `voyage-code-3` | 1024 | `VECGREP_VOYAGE_KEY` | `vecgrep[voyage]` |
+  | `gemini` | `gemini-embedding-exp-03-07` | 3072 | `VECGREP_GEMINI_KEY` | `vecgrep[gemini]` |
+
+- **Strategy-pattern `EmbeddingProvider` ABC** — `LocalProvider`,
+  `OpenAIProvider`, `VoyageProvider`, and `GeminiProvider` all implement the
+  same `embed(texts) → np.ndarray` interface. Adding new providers only
+  requires subclassing `EmbeddingProvider`.
+
+- **Dynamic vector dimensions** — `VectorStore` now stores the embedding
+  dimensionality in the meta table and creates the LanceDB schema with the
+  correct dims for the chosen provider (384 / 1024 / 1536 / 3072). Backward
+  compatible: existing 384-dim indexes open without migration.
+
+- **Provider lock** — once a project index is built with a provider, re-
+  indexing with a different provider requires `force=True`. This prevents
+  silent dimension mismatches. The lock is stored in the per-project meta
+  table; switching with `force=True` drops and recreates the chunks table.
+
+- **`get_index_status` now reports provider metadata** — the `Provider`,
+  `Model`, and `Dimensions` fields are printed in the status output.
+
+- **Optional dependency extras in `pyproject.toml`** —
+  `vecgrep[openai]`, `vecgrep[voyage]`, `vecgrep[gemini]`, `vecgrep[cloud]`
+  install only the packages needed for the chosen provider.
+
+### Changed
+
+- **Live-sync guard for cloud providers** — `watch=True` is rejected for any
+  non-local provider; live file-change sync with cloud embeddings would
+  incur unbounded API costs.
+
+- **`_get_meta` / `_set_meta` helpers on `VectorStore`** — refactored
+  manual meta-table queries into reusable key/value helpers used throughout
+  the store.
+
+### Tests
+
+- Added a full BYOK test suite (`tests/test_providers.py`) covering:
+  - Provider registry (`get_provider`, unknown provider errors)
+  - `LocalProvider` shape, dtype, and L2-normalization
+  - Backward-compatible `embed()` free function
+  - Cloud providers raising `RuntimeError` when API key or package is missing
+  - `OpenAIProvider`, `VoyageProvider`, `GeminiProvider` with mocked API
+    responses (shape, dtype, normalization, empty-input edge cases)
+
+---
+
 ## [1.6.0] — 2026-03-02
 
 ### Added
