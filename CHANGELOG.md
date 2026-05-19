@@ -4,6 +4,19 @@ All notable changes to VecGrep are documented here.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **`min_score` parameter on `search_code`** — filters out results below a
+  cosine similarity threshold before returning them. Default is `0.35`, which
+  cuts noise without affecting relevant results. Set to `0.0` to disable.
+  Values are clamped to `[0.0, 1.0]`.
+- **`Min score` field in `get_index_status`** — surfaces the default threshold
+  so users know filtering is active and how to override it.
+
+---
+
 ## [1.7.0] — 2026-03-04
 
 ### Added
