@@ -27,3 +27,4 @@ jobs:
       - uses: iamvirul/PairReviewer@v1
         with:
           reviewer-token: ${{ secrets.REVIEWER_PAT }}
+          models-token: ${{ secrets.MODELS_PAT }}
