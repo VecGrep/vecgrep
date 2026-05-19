@@ -726,7 +726,7 @@ def index_codebase(
 
 
 @mcp.tool()
-def search_code(query: str, path: str, top_k: int = 8) -> str:
+def search_code(query: str, path: str, top_k: int = 8, min_score: float = 0.35) -> str:
     """
     Semantically search an indexed codebase for code relevant to a query.
 
@@ -741,6 +741,9 @@ def search_code(query: str, path: str, top_k: int = 8) -> str:
                E.g. "how does authentication work", "database connection setup"
         path: Absolute path to the codebase root directory.
         top_k: Number of results to return (default 8, max 20).
+        min_score: Minimum cosine similarity score to include a result (default 0.35).
+                   Results below this threshold are filtered out as noise. Set to 0.0
+                   to disable filtering.
 
     Returns:
         Formatted list of matching code chunks with file:line references and
@@ -753,6 +756,7 @@ def search_code(query: str, path: str, top_k: int = 8) -> str:
             return "Error: query must not be empty"
 
         top_k = max(1, min(top_k, 20))
+        min_score = max(0.0, min(min_score, 1.0))
         root = Path(path).resolve()
 
         # Check if index has data
@@ -781,6 +785,8 @@ def search_code(query: str, path: str, top_k: int = 8) -> str:
 
             query_vec = emb_provider.embed([query])[0]
             results = store.search(query_vec, top_k=top_k)
+
+        results = [r for r in results if r["score"] >= min_score]
 
         if not results:
             return "No results found. Try re-indexing with index_codebase()."
@@ -832,7 +838,8 @@ def get_index_status(path: str) -> str:
             f"  Provider:       {s['provider']}\n"
             f"  Model:          {s['model']}\n"
             f"  Dimensions:     {s['dims']}\n"
-            f"  Compute device: {device_label}"
+            f"  Compute device: {device_label}\n"
+            f"  Min score:      0.35 (default, override via search_code min_score param)"
         )
     except Exception as e:
         return f"Error: {e}"
