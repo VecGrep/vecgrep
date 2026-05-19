@@ -137,6 +137,47 @@ class TestSearchCode:
         result = search_code("compute function", str(tmp_path), top_k=5)
         assert "Error" not in result
 
+    def test_min_score_filters_low_scoring_results(self, tmp_path):
+        _write_py(tmp_path, "a.py", "def authenticate_user(username, password):\n    pass\n")
+        _do_index(str(tmp_path))
+        # Inject a result below threshold and one above
+        low = {"file_path": str(tmp_path / "a.py"), "start_line": 1, "end_line": 2,
+               "content": "def authenticate_user(username, password):\n    pass", "score": 0.20}
+        high = {"file_path": str(tmp_path / "a.py"), "start_line": 1, "end_line": 2,
+                "content": "def authenticate_user(username, password):\n    pass", "score": 0.80}
+        with patch("vecgrep.server.VectorStore.search", return_value=[high, low]):
+            result = search_code("auth", str(tmp_path), top_k=5, min_score=0.35)
+        assert "0.80" in result
+        assert "0.20" not in result
+
+    def test_min_score_zero_disables_filtering(self, tmp_path):
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        _do_index(str(tmp_path))
+        low = {"file_path": str(tmp_path / "a.py"), "start_line": 1, "end_line": 1,
+               "content": "def foo(): pass", "score": 0.10}
+        with patch("vecgrep.server.VectorStore.search", return_value=[low]):
+            result = search_code("foo", str(tmp_path), top_k=5, min_score=0.0)
+        assert "0.10" in result
+
+    def test_min_score_clamped_above_one(self, tmp_path):
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        _do_index(str(tmp_path))
+        perfect = {"file_path": str(tmp_path / "a.py"), "start_line": 1, "end_line": 1,
+                   "content": "def foo(): pass", "score": 1.0}
+        with patch("vecgrep.server.VectorStore.search", return_value=[perfect]):
+            result = search_code("foo", str(tmp_path), top_k=5, min_score=2.0)
+        # Clamped to 1.0 — only a perfect score passes
+        assert "1.00" in result
+
+    def test_min_score_all_filtered_returns_no_results(self, tmp_path):
+        _write_py(tmp_path, "a.py", "def foo(): pass\n")
+        _do_index(str(tmp_path))
+        low = {"file_path": str(tmp_path / "a.py"), "start_line": 1, "end_line": 1,
+               "content": "def foo(): pass", "score": 0.10}
+        with patch("vecgrep.server.VectorStore.search", return_value=[low]):
+            result = search_code("foo", str(tmp_path), top_k=5, min_score=0.35)
+        assert "No results found" in result
+
 
 # ---------------------------------------------------------------------------
 # Concurrency
@@ -179,6 +220,7 @@ class TestGetIndexStatus:
         assert "Total chunks" in result
         assert "Last indexed" in result
         assert "Index size" in result
+        assert "Min score" in result
 
     def test_nonexistent_path_shows_zero_files(self, tmp_path):
         # No indexing — status should still return without raising
