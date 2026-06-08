@@ -326,16 +326,27 @@ def _extract_file(
                             node_id = _make_id(parent_id, name)
                             start_line = node.start_point[0] + 1
                             end_line = node.end_point[0] + 1
-                            nodes.append({"id": node_id, "label": name, "kind": inner_kind,
-                                          "source_file": rel_str, "start_line": start_line, "end_line": end_line})
-                            edges.append({"source": parent_id, "target": node_id, "relation": "contains"})
+                            nodes.append({
+                                "id": node_id, "label": name, "kind": inner_kind,
+                                "source_file": rel_str,
+                                "start_line": start_line, "end_line": end_line,
+                            })
+                            edges.append({
+                                "source": parent_id, "target": node_id, "relation": "contains",
+                            })
                             if inner_kind == "class":
                                 for base in _get_bases_python(child):
-                                    edges.append({"source": node_id, "target": _make_id(base),
-                                                  "relation": "inherits", "_unresolved_target_label": base})
+                                    edges.append({
+                                        "source": node_id, "target": _make_id(base),
+                                        "relation": "inherits",
+                                        "_unresolved_target_label": base,
+                                    })
                             for called in _collect_call_names(child, language):
-                                edges.append({"source": node_id, "target": _make_id(called),
-                                              "relation": "calls", "_unresolved_target_label": called})
+                                edges.append({
+                                    "source": node_id, "target": _make_id(called),
+                                    "relation": "calls",
+                                    "_unresolved_target_label": called,
+                                })
                             for grandchild in node.children:
                                 _collect_decls(grandchild, node_id)
                         break
@@ -346,8 +357,11 @@ def _extract_file(
                 node_id = _make_id(parent_id, name)
                 start_line = node.start_point[0] + 1
                 end_line = node.end_point[0] + 1
-                nodes.append({"id": node_id, "label": name, "kind": kind,
-                              "source_file": rel_str, "start_line": start_line, "end_line": end_line})
+                nodes.append({
+                    "id": node_id, "label": name, "kind": kind,
+                    "source_file": rel_str,
+                    "start_line": start_line, "end_line": end_line,
+                })
                 edges.append({"source": parent_id, "target": node_id, "relation": "contains"})
 
                 if kind == "class" and language == "python":
@@ -484,7 +498,11 @@ class GraphStore:
         self._G = G
         self._persist()
 
-        return {"nodes": G.number_of_nodes(), "edges": G.number_of_edges(), "files": files_processed}
+        return {
+            "nodes": G.number_of_nodes(),
+            "edges": G.number_of_edges(),
+            "files": files_processed,
+        }
 
     # ------------------------------------------------------------------
     # Persistence
@@ -560,8 +578,14 @@ class GraphStore:
 
         if node_id not in G:
             # Prefer exact label match, then substring
-            exact = [n for n, d in G.nodes(data=True) if d.get("label", "").lower() == node_id.lower()]
-            partial = [n for n, d in G.nodes(data=True) if node_id.lower() in d.get("label", "").lower()]
+            exact = [
+                n for n, d in G.nodes(data=True)
+                if d.get("label", "").lower() == node_id.lower()
+            ]
+            partial = [
+                n for n, d in G.nodes(data=True)
+                if node_id.lower() in d.get("label", "").lower()
+            ]
             candidates = exact or partial
             if not candidates:
                 return {"error": f"Node '{node_id}' not found in graph"}
