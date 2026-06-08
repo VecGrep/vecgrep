@@ -8,7 +8,6 @@ import pytest
 
 from vecgrep.graph import GraphStore, _file_id, _make_id
 
-
 # ---------------------------------------------------------------------------
 # ID helpers
 # ---------------------------------------------------------------------------
@@ -142,7 +141,7 @@ def test_status_after_build(built_store: GraphStore) -> None:
 def test_search_finds_class(built_store: GraphStore) -> None:
     results = built_store.search("User")
     labels = [r["label"] for r in results]
-    assert any("User" in l for l in labels)
+    assert any("User" in lbl for lbl in labels)
 
 
 def test_search_returns_score(built_store: GraphStore) -> None:
@@ -184,7 +183,7 @@ def test_neighbors_contains_methods(built_store: GraphStore) -> None:
     result = built_store.neighbors("User", depth=1)
     # User class should contain greet and __init__
     contained = [c["label"] for c in result.get("contains", [])]
-    assert any("greet" in l or "__init__" in l for l in contained)
+    assert any("greet" in lbl or "__init__" in lbl for lbl in contained)
 
 
 # ---------------------------------------------------------------------------

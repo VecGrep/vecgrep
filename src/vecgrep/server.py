@@ -1011,7 +1011,8 @@ def graph_neighbors(node_id: str, path: str, depth: int = 1) -> str:
         node = result["node"]
         lines = [
             f"Node: {node.get('label', node_id)}  [{node.get('kind', '?')}]",
-            f"  Source: {node.get('source_file', '?')}:{node.get('start_line', '?')}-{node.get('end_line', '?')}",
+            f"  Source: {node.get('source_file', '?')}"
+            f":{node.get('start_line', '?')}-{node.get('end_line', '?')}",
             f"  ID: {node.get('id', node_id)}",
             "",
         ]
@@ -1132,7 +1133,8 @@ def hybrid_search(
                 rel = r["file_path"]
             lines.append(
                 f"[{i}] {rel}:{r['start_line']}-{r['end_line']} "
-                f"(blended: {score:.2f}, vec: {r['vector_score']:.2f}, graph: {r['graph_score']:.2f})"
+                f"(blended: {score:.2f}, vec: {r['vector_score']:.2f},"
+                f" graph: {r['graph_score']:.2f})"
             )
             lines.append(r["content"])
             lines.append("")
