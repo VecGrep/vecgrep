@@ -8,6 +8,48 @@ Cursor-style semantic code search as an MCP plugin for Claude Code.
 
 Instead of grepping 50 files and sending 30,000 tokens to Claude, VecGrep returns the top 8 semantically relevant code chunks (~1,600 tokens). That's a **~95% token reduction** for codebase queries.
 
+## Benchmarks
+
+Measured on the VecGrep codebase itself (5 source files, ~26k tokens raw).
+
+### Token usage per query
+
+| Mode | Avg tokens returned | vs raw read | Savings |
+|---|---|---|---|
+| Raw file read (baseline) | 26,009 | — | — |
+| `search_code` (top_k=8) | ~3,007 | 11.6% | **88%** |
+| `hybrid_search` (top_k=8) | ~3,324 | 12.8% | **87%** |
+| `search_graph` (limit=8) | ~47 | 0.2% | **>99%** |
+
+`search_graph` returns structured node metadata only (name, kind, file, line range) — no source code — so it's ultra-cheap for structural questions ("where is X defined?", "what calls Y?").
+
+### Query latency (median, 5 runs)
+
+| Mode | Latency |
+|---|---|
+| `search_graph` | ~3ms |
+| `hybrid_search` | ~76ms |
+| `search_code` | ~83ms |
+
+`search_graph` is ~30× faster than vector search — pure in-memory graph traversal, no embedding model call.
+
+### Result correctness (structural queries)
+
+For name-based structural queries, pure vector search can rank documentation (CHANGELOG, README) above source code. The graph index fixes this:
+
+| Query | `search_code` #1 | `hybrid_search` #1 |
+|---|---|---|
+| "VectorStore search method" | ❌ CHANGELOG.md | ✅ store.py |
+| "GraphStore build" | ❌ CHANGELOG.md | ✅ server.py |
+| "embedding provider factory" | ✅ embedder.py | ✅ embedder.py |
+| "AST chunking tree-sitter" | ✅ chunker.py | ✅ chunker.py |
+
+The graph score (`graph_score: 1.00`) overrides a misleading vector match whenever the query directly names a known symbol.
+
+> **Rule of thumb:** use `search_code` for semantic/behaviour queries, `search_graph` for structural/navigation queries, `hybrid_search` when you need both.
+
+---
+
 ## How it works
 
 1. **Chunk** — Parses source files with tree-sitter to extract semantic units (functions, classes, methods)
@@ -55,6 +97,9 @@ You don't trigger VecGrep manually - Claude decides when to call the tools based
 | "How does authentication work in this codebase?" | `search_code` |
 | "Find where database connections are set up" | `search_code` |
 | "How many files are indexed?" | `get_index_status` |
+| "Build a knowledge graph of my project" | `index_graph` |
+| "What calls the VectorStore.search method?" | `search_graph` + `graph_neighbors` |
+| "Find code structurally related to authentication" | `hybrid_search` |
 
 **Typical first-time flow:**
 
@@ -118,6 +163,46 @@ Index status for: /path/to/myproject
   Model:          isuruwijesiri/all-MiniLM-L6-v2-code-search-512
   Dimensions:     384
 ```
+
+### `index_graph(path, force=False)`
+
+Build a structural knowledge graph from the codebase using tree-sitter AST extraction. No LLM required — extracts files, functions, classes, and methods as nodes; `contains`, `calls`, `imports`, and `inherits` as directed edges. Independent of the vector index.
+
+```
+index_graph("/path/to/myproject")
+# → "Graph built: 496 nodes, 1251 edges, 35 files processed."
+```
+
+### `search_graph(query, path, limit=20)`
+
+Keyword search over node labels (function names, class names, file names). Returns structural nodes with source location and connectivity degree. Ultra-cheap: ~47 tokens average, ~3ms latency.
+
+```
+search_graph("VectorStore", "/path/to/myproject")
+# → [1] CLASS  VectorStore  (score: 1.00, degree: 39)
+#       src/vecgrep/store.py:49-352
+```
+
+### `graph_neighbors(node_id, path, depth=1)`
+
+Return the structural neighbourhood of any node — callers, callees, imports, contained methods, and inheritance edges. Use `search_graph` first to find the node ID.
+
+```
+graph_neighbors("VectorStore", "/path/to/myproject", depth=1)
+# → Callers (18): _get_store, migrate_project, test fixtures...
+#   Contains (18): search, add_chunks, replace_file_chunks...
+```
+
+### `hybrid_search(query, path, top_k=8, alpha=0.6, min_score=0.0)`
+
+Vector similarity search re-ranked by graph proximity. Final score = `α × vector_score + (1−α) × graph_score`. Fixes cases where documentation ranks above source code on pure embedding similarity.
+
+```
+hybrid_search("VectorStore search method", "/path/to/myproject", alpha=0.6)
+# → [1] src/vecgrep/store.py:292-320 (blended: 0.70, vec: 0.49, graph: 1.00)
+```
+
+Requires both `index_codebase` and `index_graph` to have been run. Degrades gracefully to pure vector search if the graph index is absent.
 
 ## Configuration
 
