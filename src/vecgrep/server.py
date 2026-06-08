@@ -19,6 +19,7 @@ from watchdog.observers import Observer
 
 from vecgrep.chunker import chunk_file
 from vecgrep.embedder import EmbeddingProvider, _detect_device, get_provider
+from vecgrep.graph import GraphStore
 from vecgrep.store import VectorStore
 
 _log = logging.getLogger(__name__)
@@ -137,6 +138,11 @@ def _project_hash(path: str) -> str:
 def _get_store(path: str, dims: int = 384) -> VectorStore:
     index_dir = VECGREP_HOME / _project_hash(path)
     return VectorStore(index_dir, dims=dims)
+
+
+def _get_graph_store(path: str) -> GraphStore:
+    index_dir = VECGREP_HOME / _project_hash(path)
+    return GraphStore(index_dir)
 
 
 def _sha256_file(file_path: Path) -> str:
@@ -857,6 +863,283 @@ def stop_watching(path: str) -> str:
         observer.join(timeout=2)
     _save_watched_paths()
     return f"Stopped watching: {root_str}"
+
+
+# ---------------------------------------------------------------------------
+# Graph MCP Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def index_graph(path: str, force: bool = False) -> str:
+    """
+    Build (or rebuild) a knowledge graph for a codebase.
+
+    Walks the directory using the same skip rules as index_codebase, extracts
+    structural nodes (files, functions, classes) and edges (contains, calls,
+    imports, inherits) using tree-sitter, and persists the graph to disk.
+
+    This is independent of the vector index — you can run index_graph before
+    or after index_codebase.
+
+    Args:
+        path: Absolute path to the codebase root directory.
+        force: If True, rebuild the graph even if one already exists.
+
+    Returns:
+        Summary: node count, edge count, files processed.
+    """
+    try:
+        root = Path(path).resolve()
+        if not root.exists():
+            return f"Error: path does not exist: {path}"
+
+        gs = _get_graph_store(str(root))
+        if gs.exists() and not force:
+            s = gs.status()
+            return (
+                f"Graph already exists for {root} "
+                f"({s['nodes']} nodes, {s['edges']} edges, built {s['last_built']}). "
+                "Pass force=True to rebuild."
+            )
+
+        lock = _get_index_lock(str(root))
+        if not lock.acquire(blocking=False):
+            return f"Error: indexing of {path} is already in progress"
+
+        try:
+            gitignore = _load_gitignore(root)
+            files = _walk_files(root, gitignore)
+            stats = gs.build(files, root)
+        finally:
+            lock.release()
+
+        return (
+            f"Graph built for {root}: "
+            f"{stats['nodes']} nodes, {stats['edges']} edges, "
+            f"{stats['files']} files processed."
+        )
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def search_graph(query: str, path: str, limit: int = 20) -> str:
+    """
+    Search the knowledge graph for nodes matching a query.
+
+    Performs keyword matching over node labels (function names, class names,
+    file names) and returns the most relevant structural nodes with their
+    source locations and relationship degree.
+
+    The codebase graph must be built first with index_graph.
+
+    Args:
+        query: Keywords to search for (e.g. "VectorStore", "auth login").
+        path: Absolute path to the codebase root directory.
+        limit: Maximum number of results to return (default 20).
+
+    Returns:
+        Matching nodes with kind, source location, and connectivity degree.
+    """
+    try:
+        if not query.strip():
+            return "Error: query must not be empty"
+
+        root = Path(path).resolve()
+        gs = _get_graph_store(str(root))
+
+        if not gs.exists():
+            return (
+                f"No graph index found for {root}. "
+                "Run index_graph first to build the knowledge graph."
+            )
+
+        results = gs.search(query, limit=max(1, min(limit, 100)))
+        if not results:
+            return f"No graph nodes matched '{query}'."
+
+        lines = [f"Graph search results for '{query}' ({len(results)} nodes):\n"]
+        for i, r in enumerate(results, 1):
+            lines.append(
+                f"[{i}] {r['kind'].upper()}  {r['label']}  "
+                f"(score: {r['score']:.2f}, degree: {r['degree']})"
+            )
+            lines.append(f"    {r['source_file']}:{r['start_line']}-{r['end_line']}")
+            lines.append(f"    id: {r['id']}")
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def graph_neighbors(node_id: str, path: str, depth: int = 1) -> str:
+    """
+    Return structural neighbors of a graph node.
+
+    Shows which functions call this node, which it calls, what it imports,
+    what it contains, and what it inherits from — up to *depth* hops away.
+
+    Use search_graph first to find the exact node ID.
+
+    Args:
+        node_id: Node ID or label substring (e.g. "vectorstore_search" or "search").
+        path: Absolute path to the codebase root directory.
+        depth: Number of hops to traverse (1 = direct edges only, default 1).
+
+    Returns:
+        Categorised list of neighboring nodes with their source locations.
+    """
+    try:
+        root = Path(path).resolve()
+        gs = _get_graph_store(str(root))
+
+        if not gs.exists():
+            return (
+                f"No graph index found for {root}. "
+                "Run index_graph first."
+            )
+
+        depth = max(1, min(depth, 4))
+        result = gs.neighbors(node_id, depth=depth)
+
+        if "error" in result:
+            return result["error"]
+
+        node = result["node"]
+        lines = [
+            f"Node: {node.get('label', node_id)}  [{node.get('kind', '?')}]",
+            f"  Source: {node.get('source_file', '?')}:{node.get('start_line', '?')}-{node.get('end_line', '?')}",
+            f"  ID: {node.get('id', node_id)}",
+            "",
+        ]
+
+        def _fmt_section(title: str, items: list[dict]) -> None:
+            if not items:
+                return
+            lines.append(f"{title} ({len(items)}):")
+            for item in items:
+                lines.append(
+                    f"  • {item.get('label', item['id'])}  [{item.get('kind', '?')}]  "
+                    f"{item.get('source_file', '')}:{item.get('start_line', '')}"
+                )
+            lines.append("")
+
+        _fmt_section("Callers (called by)", result["callers"])
+        _fmt_section("Callees (calls)", result["callees"])
+        _fmt_section("Imports", result["imports"])
+        _fmt_section("Contains", result["contains"])
+        _fmt_section("Contained by", result["contained_by"])
+        _fmt_section("Inherits from", result["inherits"])
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def hybrid_search(
+    query: str,
+    path: str,
+    top_k: int = 8,
+    alpha: float = 0.6,
+    min_score: float = 0.0,
+) -> str:
+    """
+    Semantic vector search re-ranked by knowledge graph proximity.
+
+    Combines vector similarity (cosine) with structural graph proximity
+    (BFS distance from query-matched graph nodes). The final score is:
+
+        score = alpha * vector_score + (1 - alpha) * graph_score
+
+    Both vector and graph scores are normalised to [0, 1] before blending.
+    Requires both index_codebase and index_graph to have been run.
+
+    Args:
+        query: Natural language description of what you're looking for.
+        path: Absolute path to the codebase root directory.
+        top_k: Number of results to return (default 8, max 20).
+        alpha: Weight of vector score vs graph score (0.0 = graph only,
+               1.0 = vector only, default 0.6).
+        min_score: Minimum blended score threshold (default 0.0).
+
+    Returns:
+        Formatted list of code chunks ranked by blended score.
+    """
+    try:
+        if not query.strip():
+            return "Error: query must not be empty"
+        if len(query) > 500:
+            return "Error: query too long (max 500 characters)"
+
+        top_k = max(1, min(top_k, 20))
+        alpha = max(0.0, min(alpha, 1.0))
+        min_score = max(0.0, min(min_score, 1.0))
+        root = Path(path).resolve()
+
+        # --- Vector search (fetch 3x candidates for re-ranking) ---
+        candidate_k = min(top_k * 3, 60)
+        with _get_store(str(root)) as store:
+            if store.status()["total_chunks"] == 0:
+                return (
+                    f"Vector index is empty for {root}. "
+                    "Run index_codebase first."
+                )
+            stored_provider = store.get_provider_meta()["provider"]
+            try:
+                emb_provider: EmbeddingProvider = get_provider(
+                    stored_provider if stored_provider not in ("unknown",) else "local"
+                )
+            except (RuntimeError, ValueError):
+                emb_provider = get_provider("local")
+
+            query_vec = emb_provider.embed([query])[0]
+            vector_results = store.search(query_vec, top_k=candidate_k)
+
+        if not vector_results:
+            return "No results found. Try re-indexing with index_codebase."
+
+        # --- Graph scores ---
+        gs = _get_graph_store(str(root))
+        if gs.exists():
+            graph_scores = gs.chunk_graph_scores(vector_results, query)
+        else:
+            _log.info("hybrid_search: no graph index found, graph scores will be 0")
+            graph_scores = [0.0] * len(vector_results)
+
+        # --- Blend and rank ---
+        blended: list[tuple[float, dict]] = []
+        for chunk, g_score in zip(vector_results, graph_scores):
+            v_score = float(chunk["score"])
+            score = alpha * v_score + (1.0 - alpha) * g_score
+            if score >= min_score:
+                blended.append((score, {**chunk, "vector_score": v_score, "graph_score": g_score}))
+
+        blended.sort(key=lambda x: -x[0])
+        top = blended[:top_k]
+
+        if not top:
+            return "No results above minimum score threshold."
+
+        lines = [f"Hybrid search results for: '{query}' (α={alpha:.1f})\n"]
+        for i, (score, r) in enumerate(top, 1):
+            try:
+                rel = str(Path(r["file_path"]).relative_to(root))
+            except ValueError:
+                rel = r["file_path"]
+            lines.append(
+                f"[{i}] {rel}:{r['start_line']}-{r['end_line']} "
+                f"(blended: {score:.2f}, vec: {r['vector_score']:.2f}, graph: {r['graph_score']:.2f})"
+            )
+            lines.append(r["content"])
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
 
 
 # ---------------------------------------------------------------------------
