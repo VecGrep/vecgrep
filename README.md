@@ -39,10 +39,10 @@ For name-based structural queries, pure vector search can rank documentation (CH
 
 | Query | `search_code` #1 | `hybrid_search` #1 |
 |---|---|---|
-| "VectorStore search method" | ❌ CHANGELOG.md | ✅ store.py |
-| "GraphStore build" | ❌ CHANGELOG.md | ✅ server.py |
-| "embedding provider factory" | ✅ embedder.py | ✅ embedder.py |
-| "AST chunking tree-sitter" | ✅ chunker.py | ✅ chunker.py |
+| "VectorStore search method" | [WRONG] CHANGELOG.md | [OK] store.py |
+| "GraphStore build" | [WRONG] CHANGELOG.md | [OK] server.py |
+| "embedding provider factory" | [OK] embedder.py | [OK] embedder.py |
+| "AST chunking tree-sitter" | [OK] chunker.py | [OK] chunker.py |
 
 The graph score (`graph_score: 1.00`) overrides a misleading vector match whenever the query directly names a known symbol.
 
@@ -195,7 +195,7 @@ graph_neighbors("VectorStore", "/path/to/myproject", depth=1)
 
 ### `hybrid_search(query, path, top_k=8, alpha=0.6, min_score=0.0)`
 
-Vector similarity search re-ranked by graph proximity. Final score = `α × vector_score + (1−α) × graph_score`. Fixes cases where documentation ranks above source code on pure embedding similarity.
+Vector similarity search re-ranked by graph proximity. Final score = `alpha * vector_score + (1 - alpha) * graph_score`. Fixes cases where documentation ranks above source code on pure embedding similarity.
 
 ```
 hybrid_search("VectorStore search method", "/path/to/myproject", alpha=0.6)
@@ -302,7 +302,7 @@ The embedding model used by VecGrep is [`all-MiniLM-L6-v2-code-search-512`](http
 
 | | |
 |---|---|
-| ❓ **Questions** | [Start a Q&A discussion](https://github.com/VecGrep/VecGrep/discussions/new?category=q-a) |
-| 💡 **Ideas** | [Share an idea](https://github.com/VecGrep/VecGrep/discussions/new?category=ideas) |
-| 🚀 **Show & Tell** | [Share how you use VecGrep](https://github.com/VecGrep/VecGrep/discussions/new?category=show-and-tell) |
-| 🐛 **Bugs** | [Open an issue](https://github.com/VecGrep/VecGrep/issues/new) |
+| ? **Questions** | [Start a Q&A discussion](https://github.com/VecGrep/VecGrep/discussions/new?category=q-a) |
+| + **Ideas** | [Share an idea](https://github.com/VecGrep/VecGrep/discussions/new?category=ideas) |
+| > **Show & Tell** | [Share how you use VecGrep](https://github.com/VecGrep/VecGrep/discussions/new?category=show-and-tell) |
+| ! **Bugs** | [Open an issue](https://github.com/VecGrep/VecGrep/issues/new) |
