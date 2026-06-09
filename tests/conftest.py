@@ -5,6 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+# Import graph module here so its import-time tree-sitter probe runs before
+# test_chunker_ast.py replaces sys.modules["tree_sitter_languages"] with a mock.
+import vecgrep.graph  # noqa: F401
 from vecgrep.store import VectorStore
 
 

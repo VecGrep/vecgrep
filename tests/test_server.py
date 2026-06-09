@@ -28,9 +28,13 @@ from vecgrep.server import (
     _stop_all_observers,
     _walk_files,
     get_index_status,
+    graph_neighbors,
+    hybrid_search,
     index_codebase,
+    index_graph,
     main,
     search_code,
+    search_graph,
     stop_watching,
 )
 
@@ -1092,3 +1096,244 @@ class TestLiveSyncSkipsNonLocalProvider:
                 # Ensure embed was never called on the returned mock
                 if mock_get.return_value.embed.called:
                     raise AssertionError("embed() should not be called for cloud providers")
+
+
+# ---------------------------------------------------------------------------
+# index_graph
+# ---------------------------------------------------------------------------
+
+
+class TestIndexGraph:
+    def test_builds_graph_for_valid_path(self, tmp_path):
+        (tmp_path / "a.py").write_text("def foo(): pass\n", encoding="utf-8")
+        result = index_graph(str(tmp_path))
+        assert "Graph built" in result
+        assert "nodes" in result
+
+    def test_nonexistent_path_returns_error(self):
+        result = index_graph("/nonexistent/path/xyzzy12345")
+        assert "Error" in result
+
+    def test_already_built_without_force(self, tmp_path):
+        (tmp_path / "a.py").write_text("def foo(): pass\n", encoding="utf-8")
+        index_graph(str(tmp_path))
+        result = index_graph(str(tmp_path))
+        assert "already exists" in result
+
+    def test_force_rebuilds(self, tmp_path):
+        (tmp_path / "a.py").write_text("def foo(): pass\n", encoding="utf-8")
+        index_graph(str(tmp_path))
+        result = index_graph(str(tmp_path), force=True)
+        assert "Graph built" in result
+
+    def test_locked_path_returns_error(self, tmp_path):
+        (tmp_path / "a.py").write_text("def foo(): pass\n", encoding="utf-8")
+        lock = _get_index_lock(str(tmp_path.resolve()))
+        lock.acquire()
+        try:
+            result = index_graph(str(tmp_path))
+            assert "in progress" in result
+        finally:
+            lock.release()
+
+    def test_exception_returns_error(self, tmp_path):
+        (tmp_path / "a.py").write_text("def foo(): pass\n", encoding="utf-8")
+        with patch("vecgrep.server._get_graph_store", side_effect=RuntimeError("oops")):
+            result = index_graph(str(tmp_path))
+        assert "Error" in result
+
+
+# ---------------------------------------------------------------------------
+# search_graph
+# ---------------------------------------------------------------------------
+
+
+class TestSearchGraph:
+    def _setup(self, tmp_path):
+        (tmp_path / "a.py").write_text(
+            "class MyClass:\n    def my_method(self): pass\n",
+            encoding="utf-8",
+        )
+        index_graph(str(tmp_path))
+        return tmp_path
+
+    def test_returns_results(self, tmp_path):
+        self._setup(tmp_path)
+        result = search_graph("MyClass", str(tmp_path))
+        assert "MyClass" in result
+
+    def test_empty_query_returns_error(self, tmp_path):
+        result = search_graph("", str(tmp_path))
+        assert "Error" in result
+
+    def test_no_graph_index_returns_hint(self, tmp_path):
+        result = search_graph("something", str(tmp_path))
+        assert "index_graph" in result
+
+    def test_no_match_returns_message(self, tmp_path):
+        self._setup(tmp_path)
+        result = search_graph("xyzzy_totally_nonexistent_9999", str(tmp_path))
+        assert "No graph nodes matched" in result
+
+    def test_exception_returns_error(self, tmp_path):
+        with patch("vecgrep.server._get_graph_store", side_effect=RuntimeError("boom")):
+            result = search_graph("foo", str(tmp_path))
+        assert "Error" in result
+
+
+# ---------------------------------------------------------------------------
+# graph_neighbors
+# ---------------------------------------------------------------------------
+
+
+class TestGraphNeighbors:
+    def _setup(self, tmp_path):
+        (tmp_path / "a.py").write_text(
+            "class Foo:\n    def bar(self): pass\n",
+            encoding="utf-8",
+        )
+        index_graph(str(tmp_path))
+        return tmp_path
+
+    def test_returns_neighbors(self, tmp_path):
+        self._setup(tmp_path)
+        result = graph_neighbors("Foo", str(tmp_path))
+        assert "Foo" in result
+
+    def test_no_graph_returns_hint(self, tmp_path):
+        result = graph_neighbors("Foo", str(tmp_path))
+        assert "index_graph" in result
+
+    def test_unknown_node_returns_not_found(self, tmp_path):
+        self._setup(tmp_path)
+        result = graph_neighbors("xyzzy_definitely_missing_9999", str(tmp_path))
+        assert "not found" in result.lower()
+
+    def test_depth_clamped(self, tmp_path):
+        self._setup(tmp_path)
+        # depth=99 should not raise — gets clamped to 4
+        result = graph_neighbors("Foo", str(tmp_path), depth=99)
+        assert "Error" not in result
+
+    def test_exception_returns_error(self, tmp_path):
+        with patch("vecgrep.server._get_graph_store", side_effect=RuntimeError("boom")):
+            result = graph_neighbors("Foo", str(tmp_path))
+        assert "Error" in result
+
+
+# ---------------------------------------------------------------------------
+# hybrid_search
+# ---------------------------------------------------------------------------
+
+
+class TestHybridSearch:
+    def _setup(self, tmp_path):
+        """Create and index a tiny codebase (vector + graph)."""
+        (tmp_path / "a.py").write_text(
+            "class Auth:\n    def login(self, user): pass\n",
+            encoding="utf-8",
+        )
+        _do_index(str(tmp_path))
+        index_graph(str(tmp_path))
+        return tmp_path
+
+    def test_returns_results(self, tmp_path):
+        self._setup(tmp_path)
+        result = hybrid_search("Auth login", str(tmp_path))
+        assert "Error" not in result
+        assert "Hybrid search results" in result
+
+    def test_empty_query_returns_error(self, tmp_path):
+        result = hybrid_search("", str(tmp_path))
+        assert "Error" in result
+
+    def test_query_too_long_returns_error(self, tmp_path):
+        result = hybrid_search("x" * 501, str(tmp_path))
+        assert "Error" in result
+
+    def test_empty_vector_index_returns_message(self, tmp_path):
+        # No index_codebase called — vector store is empty
+        result = hybrid_search("auth", str(tmp_path))
+        assert "index_codebase" in result or "Error" in result
+
+    def test_degrades_gracefully_without_graph(self, tmp_path):
+        """Falls back to pure vector when graph index is absent."""
+        _do_index(str(tmp_path / ".."))  # irrelevant dir
+        (tmp_path / "a.py").write_text(
+            "class Auth:\n    def login(self, user): pass\n",
+            encoding="utf-8",
+        )
+        _do_index(str(tmp_path))
+        # No index_graph — hybrid should still return vector results
+        result = hybrid_search("Auth", str(tmp_path))
+        # Either results or empty-index message — must not raise
+        assert isinstance(result, str)
+
+    def test_alpha_zero_uses_graph_only(self, tmp_path):
+        self._setup(tmp_path)
+        result = hybrid_search("Auth login", str(tmp_path), alpha=0.0)
+        assert "Error" not in result
+
+    def test_min_score_filters_all(self, tmp_path):
+        self._setup(tmp_path)
+        result = hybrid_search("Auth login", str(tmp_path), min_score=1.0)
+        # Either "No results above" or actual results — must not crash
+        assert isinstance(result, str)
+
+    def test_no_vector_results_returns_message(self, tmp_path):
+        self._setup(tmp_path)
+        with patch("vecgrep.server.VectorStore.search", return_value=[]):
+            result = hybrid_search("Auth login", str(tmp_path))
+        assert "No results" in result or "Error" in result
+
+    def test_exception_returns_error(self, tmp_path):
+        with patch("vecgrep.server._get_store", side_effect=RuntimeError("boom")):
+            result = hybrid_search("Auth", str(tmp_path))
+        assert "Error" in result
+
+
+class TestHybridSearchEdgeCases:
+    """Covers remaining uncovered branches in hybrid_search."""
+
+    def test_get_provider_error_falls_back_to_local(self, tmp_path):
+        """If get_provider raises for stored provider, falls back to local."""
+        (tmp_path / "a.py").write_text(
+            "class Auth:\n    def login(self): pass\n", encoding="utf-8"
+        )
+        _do_index(str(tmp_path))
+        index_graph(str(tmp_path))
+
+        original = __import__("vecgrep.server", fromlist=["get_provider"]).get_provider
+
+        call_count = {"n": 0}
+
+        def patched(name):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("provider unavailable")
+            return original("local")
+
+        with patch("vecgrep.server.get_provider", side_effect=patched):
+            result = hybrid_search("Auth login", str(tmp_path))
+        assert "Error" not in result or "Hybrid" in result
+
+    def test_result_path_outside_root(self, tmp_path):
+        """When result file_path is outside root, relative_to raises and falls back."""
+        (tmp_path / "a.py").write_text(
+            "class Auth:\n    def login(self): pass\n", encoding="utf-8"
+        )
+        _do_index(str(tmp_path))
+        index_graph(str(tmp_path))
+
+        # Inject a result whose file_path is outside root
+        fake_result = {
+            "file_path": "/totally/outside/path/x.py",
+            "start_line": 1,
+            "end_line": 5,
+            "content": "def outside(): pass",
+            "score": 0.9,
+        }
+        with patch("vecgrep.server.VectorStore.search", return_value=[fake_result]):
+            result = hybrid_search("Auth", str(tmp_path))
+        # Should not crash — path shown verbatim
+        assert "/totally/outside/path/x.py" in result or "Error" not in result

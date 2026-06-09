@@ -4,6 +4,39 @@ All notable changes to VecGrep are documented here.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Knowledge graph index** — `index_graph` builds a structural code graph from
+  any indexed codebase using tree-sitter AST extraction (no LLM required).
+  Extracts files, functions, classes, and methods as nodes; `contains`, `calls`,
+  `imports`, and `inherits` as directed edges. Graph is persisted as
+  `graph.json` alongside the vector index in `~/.vecgrep/<project>/`.
+
+- **`search_graph` MCP tool** — keyword search over node labels (function names,
+  class names, file names). Returns matching nodes with kind, source location,
+  and connectivity degree.
+
+- **`graph_neighbors` MCP tool** — given a node ID or label, returns its
+  direct structural neighborhood: callers, callees, imports, contains, and
+  inheritance edges. Supports `depth` up to 4 hops.
+
+- **`hybrid_search` MCP tool** — blends vector similarity and graph proximity
+  into a single ranked result list. Score formula:
+  `α × vector_score + (1−α) × graph_score`. Both inputs are normalised to
+  `[0, 1]`. Requires both `index_codebase` and `index_graph` to have been run;
+  degrades gracefully to pure vector search if the graph index is absent.
+
+- **`networkx>=3.2` dependency** — used for graph construction, BFS traversal,
+  and JSON serialisation via `networkx.readwrite.json_graph`.
+
+- **`tree-sitter==0.21.3` pin** — pins tree-sitter to the version compatible
+  with `tree-sitter-languages 1.10.x` to prevent silent extraction failures
+  caused by the 0.22+ API break.
+
+---
+
 ## [1.8.0] — 2026-05-19
 
 ### Added
