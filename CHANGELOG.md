@@ -4,7 +4,7 @@ All notable changes to VecGrep are documented here.
 
 ---
 
-## [Unreleased]
+## [2.0.0] — 2026-06-09
 
 ### Added
 
