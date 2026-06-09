@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/VecGrep/VecGrep/actions/workflows/ci.yml/badge.svg)](https://github.com/VecGrep/VecGrep/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/VecGrep/VecGrep/branch/main/graph/badge.svg)](https://codecov.io/gh/VecGrep/VecGrep)
+[![PyPI](https://img.shields.io/pypi/v/vecgrep)](https://pypi.org/project/vecgrep/)
 [![Discussions](https://img.shields.io/github/discussions/VecGrep/VecGrep)](https://github.com/VecGrep/VecGrep/discussions)
 
 Cursor-style semantic code search as an MCP plugin for Claude Code.
