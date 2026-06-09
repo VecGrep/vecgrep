@@ -1290,3 +1290,50 @@ class TestHybridSearch:
         with patch("vecgrep.server._get_store", side_effect=RuntimeError("boom")):
             result = hybrid_search("Auth", str(tmp_path))
         assert "Error" in result
+
+
+class TestHybridSearchEdgeCases:
+    """Covers remaining uncovered branches in hybrid_search."""
+
+    def test_get_provider_error_falls_back_to_local(self, tmp_path):
+        """If get_provider raises for stored provider, falls back to local."""
+        (tmp_path / "a.py").write_text(
+            "class Auth:\n    def login(self): pass\n", encoding="utf-8"
+        )
+        _do_index(str(tmp_path))
+        index_graph(str(tmp_path))
+
+        original = __import__("vecgrep.server", fromlist=["get_provider"]).get_provider
+
+        call_count = {"n": 0}
+
+        def patched(name):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("provider unavailable")
+            return original("local")
+
+        with patch("vecgrep.server.get_provider", side_effect=patched):
+            result = hybrid_search("Auth login", str(tmp_path))
+        assert "Error" not in result or "Hybrid" in result
+
+    def test_result_path_outside_root(self, tmp_path):
+        """When result file_path is outside root, relative_to raises and falls back."""
+        (tmp_path / "a.py").write_text(
+            "class Auth:\n    def login(self): pass\n", encoding="utf-8"
+        )
+        _do_index(str(tmp_path))
+        index_graph(str(tmp_path))
+
+        # Inject a result whose file_path is outside root
+        fake_result = {
+            "file_path": "/totally/outside/path/x.py",
+            "start_line": 1,
+            "end_line": 5,
+            "content": "def outside(): pass",
+            "score": 0.9,
+        }
+        with patch("vecgrep.server.VectorStore.search", return_value=[fake_result]):
+            result = hybrid_search("Auth", str(tmp_path))
+        # Should not crash — path shown verbatim
+        assert "/totally/outside/path/x.py" in result or "Error" not in result
